@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Citation Trends"
+  short_description: "Compare citations across matching AI search checks"
+  default_prompt: "Use $visibility-trends to compare two existing AI citation runs and identify gained or lost citations."

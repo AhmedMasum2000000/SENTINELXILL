@@ -1,0 +1,4 @@
+interface:
+  display_name: "Visibility Onboarding"
+  short_description: "Research websites and infer tracking defaults"
+  default_prompt: "Use $visibility-onboarding to set up AI visibility and SEO tracking for my websites."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Keyword Opportunities"
+  short_description: "Find relevant keywords and measure search demand"
+  default_prompt: "Use $keyword-opportunities to research my brand and return evidence-linked recommendations."

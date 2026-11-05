@@ -1,0 +1,474 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "operationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capability": {
+      "type": "string",
+      "enum": [
+        "citation-check",
+        "citation-import",
+        "citation-compare",
+        "competitor-research",
+        "keyword-research",
+        "trends-research",
+        "backlink-research",
+        "link-research",
+        "action-review",
+        "schedule-review",
+        "portfolio-review"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "websiteId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "marketId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "panelId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "panelRevision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      },
+      "required": [
+        "websiteId",
+        "marketId",
+        "panelId",
+        "panelRevision"
+      ]
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "submitted",
+        "collecting",
+        "partial",
+        "completed",
+        "blocked",
+        "unknown_external_outcome"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "apify",
+            "supplied_export",
+            "public_research",
+            "synthetic"
+          ]
+        },
+        "actorId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "buildId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "datasetId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "identityVerified": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "actorId",
+        "runId",
+        "buildId",
+        "datasetId",
+        "observedAt",
+        "identityVerified"
+      ]
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxPolls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pageSize": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxPages": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxRows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "windowSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "readTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "readRetries": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "maxPolls",
+        "pageSize",
+        "maxPages",
+        "maxRows",
+        "windowSeconds",
+        "readTimeoutSeconds",
+        "readRetries"
+      ]
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "providerStatus": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "pagesSaved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rowsSaved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nextOffset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "datasetItemCount": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "itemCountObservedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "heldReservationUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "providerStatus",
+        "terminal",
+        "pagesSaved",
+        "rowsSaved",
+        "nextOffset",
+        "datasetItemCount",
+        "itemCountObservedAt",
+        "heldReservationUsd"
+      ]
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "raw_input",
+              "raw_page",
+              "raw_summary",
+              "run_metadata",
+              "derived_data",
+              "report",
+              "handoff"
+            ]
+          },
+          "savedAndReadBack": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "kind",
+          "savedAndReadBack"
+        ]
+      }
+    },
+    "verification": {
+      "enum": [
+        "prepared_only",
+        "synthetic_only",
+        "supplied_export_analysis",
+        "provider_readback",
+        "live_measurement"
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "enum": [
+                "MISSING_RUNTIME",
+                "MISSING_PROJECT",
+                "INVALID_INPUT",
+                "DENIED_ACCESS",
+                "AUTH_REQUIRED",
+                "STATE_CONFLICT",
+                "PARTIAL_COMPLETION",
+                "UNKNOWN_EXTERNAL_OUTCOME",
+                "RATE_LIMITED",
+                "UPSTREAM_FAILED",
+                "STORAGE_UNAVAILABLE"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "readRetryable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "readRetryable"
+          ]
+        }
+      ]
+    },
+    "nextAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "none",
+            "resolve_access",
+            "resolve_state",
+            "prepare_input",
+            "request_scope",
+            "reconcile_submission",
+            "poll_run",
+            "resume_read",
+            "review_artifact",
+            "verify_execution",
+            "export_state"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "action",
+        "description",
+        "requires"
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "operationId",
+    "capability",
+    "scope",
+    "state",
+    "source",
+    "bounds",
+    "checkpoint",
+    "outputs",
+    "verification",
+    "error",
+    "nextAction"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AI Search Visibility Tracker operation receipt",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "unknown_external_outcome"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": "UNKNOWN_EXTERNAL_OUTCOME"
+              }
+            }
+          },
+          "nextAction": {
+            "properties": {
+              "action": {
+                "const": "reconcile_submission"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "submitted"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "kind": {
+                "const": "synthetic"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "verification": {
+            "const": "synthetic_only"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verification": {
+            "const": "live_measurement"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "kind": {
+                "const": "apify"
+              },
+              "identityVerified": {
+                "const": true
+              },
+              "runId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

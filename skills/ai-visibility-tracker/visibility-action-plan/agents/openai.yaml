@@ -1,0 +1,4 @@
+interface:
+  display_name: "SEO Visibility Action Plan"
+  short_description: "Plan useful work and follow up on actions"
+  default_prompt: "Use $visibility-action-plan to prioritize evidence-backed SEO work, prepare a brief and review my completed actions."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Link Opportunities"
+  short_description: "Qualify backlink and AI citation source prospects"
+  default_prompt: "Use $link-opportunities to research my brand and return evidence-linked recommendations."

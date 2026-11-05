@@ -1,0 +1,235 @@
+import { useMemo, useState } from "react";
+import { FS, sans, inkNum, MICRO } from "../../ui/theme.js";
+import { fmtM, fmtX, shortCompany } from "../../ui/format.js";
+import { H3, InfoTip, TIP_TRIGGER_STYLE } from "../../ui/components.jsx";
+import { POWER_LAW_TITLE } from "./chartTitles.js";
+
+// The "standard" venture power-law exponent: returns decay ~ rank^-1 (Zipf).
+// Anchored to this fund's own top holding, so the reference asks "given your best
+// deal, does the rest of the book decay like a textbook power law?".
+const STD_K = 1;
+
+const W = 960, H = 440, PL = 54, PR = 44, PT = 22, PB = 44;
+// hover card: fixed width; the name wraps at word breaks onto as many lines as it needs
+const TIP_W = 186, TIP_PAD = 11, TIP_LINE = 15, TIP_NAME_CHARS = 26; // ~chars that fit the card at FS.small bold
+
+/** `text` broken at spaces into lines of at most `max` characters (a longer word keeps its own line). */
+function wrapWords(text, max) {
+  const lines = [];
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const last = lines[lines.length - 1];
+    if (last != null && (last + " " + word).length <= max) lines[lines.length - 1] = last + " " + word;
+    else lines.push(word);
+  }
+  return lines;
+}
+const PLOTW = W - PL - PR, PLOTH = H - PT - PB;
+const log10 = (x) => Math.log10(x);
+
+/** Least-squares slope/intercept of Y=a+bX over the (logRank, logMoic) points
+ *  with moic>0. The fund's decay exponent is -b. */
+function fitLogLog(pts) {
+  const n = pts.length;
+  if (n < 2) return null;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const [x, y] of pts) { sx += x; sy += y; sxx += x * x; sxy += x * y; }
+  const denom = n * sxx - sx * sx;
+  if (Math.abs(denom) < 1e-12) return null;
+  const b = (n * sxy - sx * sy) / denom;
+  const a = (sy - b * sx) / n;
+  return { a, b };
+}
+
+const FIT_COLOR = "var(--ink-button-background-color-primary-base-default)";
+const ABOVE_COLOR = "var(--ink-color-global-feedback-positive-strong)";
+const BELOW_COLOR = "var(--ink-color-global-feedback-negative-strong)";
+const REF_DASH = "5 4";
+
+const LegendItem = ({ swatch, children }) => (
+  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>{swatch}{children}</span>
+);
+const lineSwatch = (color, dash) => (
+  <svg width="20" height="10" aria-hidden="true">
+    <line x1="0" x2="20" y1="5" y2="5" style={{ stroke: color }} strokeWidth="2" strokeDasharray={dash} />
+  </svg>
+);
+const dotSwatch = (color, ring) => (
+  <svg width="10" height="10" aria-hidden="true">
+    <circle cx="5" cy="5" r="4" style={{ fill: ring ? "none" : color, stroke: color }} strokeWidth={ring ? 1.5 : 0} />
+  </svg>
+);
+
+/** Keys the two lines and the dot encodings. Sits under the plot, indented to the
+ *  plot's left gutter (PL as a share of the viewBox width, which scales with it). */
+function PowerLawLegend({ hasAbove, hasBelow, hasExited, allFunds, poolLabel }) {
+  return (
+    <div style={{ ...sans, fontSize: FS.micro, lineHeight: "20px", color: "var(--ink-color-global-text-subtle)",
+      display: "flex", flexWrap: "wrap", columnGap: 16, rowGap: 4, marginTop: 8, paddingLeft: `${(PL / W) * 100}%` }}>
+      <LegendItem swatch={lineSwatch(MICRO, REF_DASH)}>
+        <InfoTip portal placement="top" width={260} trigger={
+          <span tabIndex={0} style={TIP_TRIGGER_STYLE}>Standard power law</span>
+        }>
+          The typical venture pattern: the #2 holding returns half as much as #1, #3 a third, #4 a quarter, and so on.
+        </InfoTip>
+      </LegendItem>
+      <LegendItem swatch={lineSwatch(FIT_COLOR)}>{allFunds ? `Fitted decay across ${poolLabel}` : "This fund's fitted decay"}</LegendItem>
+      {hasAbove && <LegendItem swatch={dotSwatch(ABOVE_COLOR)}>Above standard</LegendItem>}
+      {hasBelow && <LegendItem swatch={dotSwatch(BELOW_COLOR)}>Below standard</LegendItem>}
+      {hasExited && <LegendItem swatch={dotSwatch(MICRO, true)}>Exited</LegendItem>}
+    </div>
+  );
+}
+
+/** Power-law chart: each of the fund's unrealized holdings plotted by its gross
+ *  return multiple (fair value ÷ cost at the modeled marks) against its rank, on
+ *  log–log axes so a power law is a straight line. The dashed reference is the
+ *  standard rank^-1 power law anchored to the fund's top holding; the solid line
+ *  is the fund's own fitted decay. Dots above the reference (green) beat the
+ *  power-law expectation at their rank; below (red) fall short. With `allFunds` the
+ *  holdings are those of the pooled funds (all funds, or a family), ranked together; `poolLabel`
+ *  names them. */
+export default function PowerLawChart({ companies, fundName, allFunds, poolLabel }) {
+  // All hooks must run before any early return (Rules of Hooks) — a fund with
+  // <2 positive holdings makes `model` null below, and hoisting keeps the hook
+  // count stable when switching to/from such a fund (else React throws).
+  const [hoverId, setHoverId] = useState(null);
+  const model = useMemo(() => {
+    const positive = companies.filter((c) => c.moic > 0);
+    if (positive.length < 2) return null;
+    const topMoic = positive[0].moic; // companies arrive ranked desc
+    const N = companies.length;
+    // reference multiple at a rank (1-based)
+    const refAt = (rank) => topMoic * Math.pow(rank, -STD_K);
+    // fit the fund's own exponent over positive points. Companies arrive ranked
+    // desc by moic and all positives precede any zero, so positive[i] is rank i+1.
+    const fit = fitLogLog(positive.map((c, i) => [log10(i + 1), log10(c.moic)]));
+    // axis domains (log10)
+    const moics = positive.map((c) => c.moic);
+    const yTop = Math.max(...moics) * 1.4;
+    const yFloorRaw = Math.min(...moics) * 0.6;
+    const yFloor = Math.max(0.02, Math.min(0.5, yFloorRaw)); // keep write-downs visible at the base
+    const yMinLog = log10(yFloor), yMaxLog = log10(yTop);
+    const xMax = log10(Math.max(N, 2));
+    const x = (rank) => PL + (xMax ? log10(rank) / xMax : 0) * PLOTW;
+    const y = (moic) => {
+      const v = Math.max(yFloor, moic || yFloor);
+      return PT + (1 - (log10(v) - yMinLog) / (yMaxLog - yMinLog)) * PLOTH;
+    };
+    const pts = companies.map((c, i) => {
+      const rank = i + 1;
+      const ref = refAt(rank);
+      return { ...c, rank, ref, above: c.moic >= ref, tone: rank === 1 ? "top" : c.moic >= ref ? "above" : "below", clamped: c.moic < yFloor,
+               cx: x(rank), cy: y(c.moic) };
+    });
+    // the fund's fitted decay line, straight on log–log (screen-space endpoints)
+    const fittedMoic = (rank) => (fit ? Math.pow(10, fit.a + fit.b * log10(rank)) : null);
+    const fitPath = fit ? `M ${x(1)} ${y(fittedMoic(1))} L ${x(N)} ${y(fittedMoic(N))}` : null;
+    // tick sets that fall inside the domains
+    const yTicks = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250].filter((t) => t >= yFloor && t <= yTop);
+    const xTicks = [1, 2, 3, 5, 10, 20, 50, 100, 200].filter((t) => t <= N);
+    return { N, topMoic, fitPath, x, y, refAt, pts, yTicks, xTicks, xMax, yFloor };
+  }, [companies]);
+
+  if (!model) {
+    return (
+      <div style={{ marginBottom: 16 }}>
+        <span style={{ ...sans, fontSize: FS.body, color: "var(--ink-color-global-text-subtle)" }}>
+          Not enough marked holdings with positive value to plot a return distribution for this fund.
+        </span>
+      </div>
+    );
+  }
+
+  const { N, fitPath, x, y, refAt, pts, yTicks, xTicks } = model;
+  const hovered = pts.find((p) => p.id === hoverId) || null;
+  // reference (dashed) line endpoints: straight on log–log
+  const refPath = `M ${x(1)} ${y(refAt(1))} L ${x(N)} ${y(refAt(N))}`;
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 16 }}>
+        <H3>{POWER_LAW_TITLE}</H3>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block" }} role="img"
+        aria-label={`Return multiple by rank for ${fundName}, log-log, vs a standard venture power law`}>
+        {/* y gridlines + labels (multiples) */}
+        {yTicks.map((t) => (
+          <g key={`y${t}`}>
+            <line x1={PL} x2={W - PR} y1={y(t)} y2={y(t)} style={{ stroke: "var(--ink-color-global-border-subtle)" }} strokeWidth="1" />
+            <text x={PL - 8} y={y(t) + 3} textAnchor="end" style={{ ...inkNum, fontSize: FS.micro, fill: MICRO }}>{fmtX(t)}</text>
+          </g>
+        ))}
+        {/* x ticks + labels (rank) */}
+        {xTicks.map((t) => (
+          <g key={`x${t}`}>
+            <line x1={x(t)} x2={x(t)} y1={PT} y2={H - PB} style={{ stroke: "var(--ink-color-global-border-subtle)" }} strokeWidth="1" />
+            <text x={x(t)} y={H - PB + 16} textAnchor="middle" style={{ ...sans, fontSize: FS.micro, fill: MICRO }}>#{t}</text>
+          </g>
+        ))}
+        <line x1={PL} x2={W - PR} y1={H - PB} y2={H - PB} style={{ stroke: "var(--ink-color-global-border-subtle)" }} strokeWidth="1" />
+        <text x={PL} y={H - 6} style={{ ...sans, fontSize: FS.micro, fill: "var(--ink-color-global-text-subtle)" }}>Rank · log scale (best → worst)</text>
+        {/* starts at the left edge: end-anchored at the gutter, the label runs off the viewBox */}
+        <text x={0} y={PT - 8} style={{ ...sans, fontSize: FS.micro, fill: "var(--ink-color-global-text-subtle)" }}>MOIC · log scale</text>
+
+        {/* standard power-law reference (dashed) */}
+        <path d={refPath} fill="none" style={{ stroke: MICRO }} strokeWidth="1.6" strokeDasharray={REF_DASH} opacity="0.8" />
+        {/* fund's fitted decay (solid) */}
+        {fitPath && <path d={fitPath} fill="none" style={{ stroke: FIT_COLOR }} strokeWidth="2" strokeLinejoin="round" />}
+
+        {/* connector from each dot to the reference at its rank (shows deviation) */}
+        {pts.map((p) => (
+          <line key={`d${p.id}`} x1={p.cx} x2={p.cx} y1={p.cy} y2={y(p.ref)}
+            style={{ stroke: p.above ? ABOVE_COLOR : BELOW_COLOR }} strokeWidth="1" opacity="0.28" />
+        ))}
+
+        {/* dots — company names are shown on hover (fixed labels collide). Realized
+            exits render as an open ring, live holdings as a filled dot. */}
+        {pts.map((p, i) => {
+          const on = hovered && hovered.id === p.id;
+          const base = { top: "var(--ink-color-global-text-default)", above: ABOVE_COLOR, below: BELOW_COLOR }[p.tone];
+          return (
+            <g key={p.id} data-datum-id={p.id} data-datum-type="company" data-datum-label={p.name}
+              onMouseEnter={() => setHoverId(p.id)} onMouseLeave={() => setHoverId(null)}
+              style={{ cursor: "pointer" }}>
+              <title>{`#${p.rank} ${p.name} · ${fmtX(p.moic)}`}</title>
+              {/* generous invisible hit target so hover is easy */}
+              <circle cx={p.cx} cy={p.cy} r={12} fill="transparent" />
+              <circle cx={p.cx} cy={p.cy} r={on ? 6.5 : i === 0 ? 5 : 3.8}
+                style={{ fill: p.realized ? "var(--ink-color-global-surface-background-default)" : base, stroke: p.realized ? base : "var(--ink-color-global-surface-background-default)" }} strokeWidth={p.realized ? 2 : 1} />
+            </g>
+          );
+        })}
+
+        {/* hover tooltip — the only place a company name appears */}
+        {hovered && (() => {
+          const flip = hovered.cx > PL + PLOTW * 0.6;
+          const nameLines = wrapWords(shortCompany(hovered.name), TIP_NAME_CHARS);
+          const tw = TIP_W, th = 46 + (nameLines.length - 1) * TIP_LINE;
+          const tx = flip ? hovered.cx - tw - 12 : hovered.cx + 12;
+          const ty = Math.max(PT, Math.min(hovered.cy - th / 2, H - PB - th));
+          return (
+            <g pointerEvents="none">
+              <rect x={tx} y={ty} width={tw} height={th} rx="6"
+                style={{
+                  fill: "var(--ink-color-global-surface-background-default)",
+                  stroke: "var(--ink-color-global-border-subtle)",
+                  filter: "drop-shadow(0 2px 6px rgba(0,0,0,.12))",
+                }}
+                strokeWidth="1" />
+              <text x={tx + TIP_PAD} y={ty + 18} style={{ ...sans, fontSize: FS.small, fontWeight: 700, fill: "var(--ink-color-global-text-default)" }}>
+                {nameLines.map((line, i) => <tspan key={i} x={tx + TIP_PAD} dy={i ? TIP_LINE : 0}>{line}</tspan>)}
+              </text>
+              <text x={tx + TIP_PAD} y={ty + 34 + (nameLines.length - 1) * TIP_LINE} style={{ ...inkNum, fontSize: FS.small, fill: "var(--ink-color-global-text-subtle)" }}>
+                #{hovered.rank} · {fmtX(hovered.moic)} · {fmtM(hovered.value)}{hovered.realized ? " · exited" : ""}
+              </text>
+            </g>
+          );
+        })()}
+      </svg>
+
+      {/* a key shows only for a mark the chart draws */}
+      <PowerLawLegend hasAbove={pts.some((p) => p.tone === "above")} hasBelow={pts.some((p) => p.tone === "below")}
+        hasExited={pts.some((p) => p.realized)} allFunds={allFunds} poolLabel={poolLabel} />
+    </div>
+  );
+}

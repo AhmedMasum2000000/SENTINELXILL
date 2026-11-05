@@ -1,0 +1,142 @@
+# Skeleton Guide
+
+Mechanics for Phases 5–6: wiring the walking skeleton and realizing the
+foundations. The plan's skeleton spec is the contract; this guide is how it
+becomes running code. The skeleton's purpose is to prove the architecture
+*runs* — every major container exercised by one trivial end-to-end operation,
+with stubs exactly where the plan said stubs.
+
+## The wiring contract, per unit type
+
+- **Frontend surface(s)** — the **UI shell**: layout, navigation frame, and
+  the design system wired in (below). One page/screen that calls the API and
+  renders the result. No feature screens — the shell is the landing place for
+  per-slice UI work later.
+- **API unit** — one trivial endpoint (e.g., a health-or-echo route that
+  round-trips the database): request in → domain stub → store → response out.
+  Error handling conventions in place (the cross-cutting concepts' shape, not
+  their full depth).
+- **Worker/async unit** (if the architecture has one) — one no-op job through
+  the real queue/trigger mechanism locally, proving the async path exists.
+- **Database/store — running locally, via a committed compose file by
+  default.** When the architecture's store has a first-party container image,
+  the local story is `docker-compose.yml` at the repo root: one service per
+  store, **pinned to the same major version the deployed environment will
+  run** (a local Postgres 16 against a deployed 14 is a bug factory), data in
+  **named volumes** so it survives `down`/`up`, and the up / down / reset
+  commands recorded in scaffold-notes. Deviate only when compose genuinely
+  can't serve: a managed-only store with no first-party image (use the
+  vendor's emulator or local mode) or an embedded store (SQLite, DuckDB —
+  the "local store" is a file). **Record the deviation and its reason** in
+  scaffold-notes. Either way: one table/collection the skeleton reads and
+  writes, plus the migration mechanism initialized (the *mechanism*, with
+  migration 001 — not the schema; schemas are per-slice detailed-design work).
+- **Other local dependencies — ask once.** For each non-store dependency the
+  architecture named (cache, queue, object storage, mail catcher), ask
+  whether it belongs in the compose file or is expected already running on
+  the developer's machine. Both are legitimate — some teams want one
+  self-contained stack, others already run these natively and don't want a
+  second copy. The answer shapes the compose file and belongs in the
+  scaffold-plan playback; record it in scaffold-notes.
+- **The end-to-end test** — one automated test driving the whole path:
+  UI-or-API entry → store → back, asserting the round trip. This test *is*
+  the done-when condition's local half, encoded — written in the **E2E
+  workspace** with the architecture-named E2E framework (see Foundations),
+  seeding the suite later work extends.
+
+Stubs are honest stubs: clearly named, returning fixed shapes, with a comment
+pointing at the slice that will replace them. The plan's real-vs-stubbed list
+is authoritative — don't gold-plate a stub into a feature.
+
+## Wiring the design system
+
+From ux-foundations' outputs:
+
+- **tokens.json → the stack's token mechanism.** DTCG JSON transforms to
+  whatever the frontend uses — CSS custom properties, a theme config, a
+  Tailwind config's values. Wire it so the shell *consumes* the tokens (the
+  verification check is literal: delete tokens.json's values and the shell
+  visibly breaks). Don't hand-copy values into components — the wiring is the
+  point.
+- **design.md referenced from AGENTS.md**, so every future
+  UI session builds inside the system. The shell's own minimal styling (layout,
+  nav) uses the tokens, demonstrating the pattern per-slice work will follow.
+- Multi-surface projects: each frontend unit gets the wiring; surface-specific
+  token overrides (from ux-foundations Part B) apply per surface.
+
+## Foundations (Phase 6)
+
+The plan's engineering-foundations checklist made real — sized to the
+checklist, not beyond it:
+
+- **CI pipeline**: lint + test + build for every unit — plus the **coverage
+  step per the architecture's stance** (a gating threshold job when enforced,
+  report generation when report-only, nothing when none) — on the target the
+  plan or user named. It must be written to pass — a red pipeline at delivery
+  is a verification failure, not a TODO.
+- **Config templates, one per deployable unit**: every unit that reads
+  configuration gets its own template beside its code, in **that stack's
+  idiom** (`.env.example` in Node ecosystems, whatever the chosen stack uses
+  elsewhere — never hard-code one ecosystem's convention). Contents are
+  variable **names with placeholders only** — never working values, never a
+  secret, not even a local one. Two inline markers carry what the names
+  can't: a secrets grouping (`# --- secrets ---`) and scope notes where a
+  variable isn't universal (`# prod only`). **These templates are the
+  project's variable inventory** — no separate list exists to drift from them.
+- **Config reading wired from day one**: every unit reads its configuration
+  from the environment *in the walking skeleton itself* — no hardcoded hosts,
+  ports, or URLs. The skeleton's round trip must run on values that came from
+  config; that's what makes the pattern structural instead of a retrofit
+  three features later, when half the code has already baked constants in.
+- **Local config: generated, then asked**: scaffolding **generates** the
+  gitignored local config file per unit, filling everything it can derive
+  from what it just created (the local store's URL from the compose file it
+  wrote, the ports it chose, sensible non-secret defaults). It **asks the
+  user only for values it genuinely cannot know** — third-party keys — and
+  only when the skeleton needs them to pass. This step is blocking: the
+  skeleton test can't be verified without it. Record how to recreate the file
+  in scaffold-notes.
+- **Deployed config is not scaffolding's job**: no deployed environment's
+  values are created here — those are supplied at initial deployment, through
+  whatever mechanism that platform offers. A user who wants a file-style
+  config for a VM-target deploy can create one; it changes nothing in the
+  pipeline.
+- **Observability hooks**: structured logging in every unit at minimum;
+  metrics/tracing scaffolded only if the architecture's cross-cutting concepts
+  demanded them at skeleton stage.
+- **Test harness — realize the frameworks the architecture named.** The
+  architecture's cross-cutting Testing entry names the unit/integration runner
+  per stack unit, the E2E framework, **and the coverage stance** (user-decided
+  there; scaffolding executes, it doesn't choose). Install and configure
+  exactly those, wire them into CI, keep whatever unit-test scaffolding the
+  generators provided (adapted to the named runner where they differ), and set
+  the placement/naming conventions with one example test per unit. **Coverage
+  per the stance**: **enforced** → the named tool configured with the stated
+  threshold and scope, wired as a CI gate that fails the pipeline;
+  **report-only** → coverage generated and surfaced in CI, no gate; **none**
+  → nothing installed, and nothing "helpfully" added. **Fallback**: only when
+  the architecture is silent on testing (an older document, or the entry was
+  skipped) use the ecosystem-standard runner per unit with **no coverage
+  tooling** — and note the gap in scaffold-notes as a candidate architecture
+  amendment. Record thresholds alongside versions in scaffold-notes.
+- **E2E workspace**: stood up as a system-level suite beside the units (e.g.,
+  `e2e/` in the monorepo, or the workspace tool's convention) using the
+  architecture-named E2E framework, configured to drive the frontend against
+  the real local stack. **The skeleton's end-to-end test is written in it —
+  the skeleton test is the E2E suite's seed**, and later work extends this
+  suite for the architecture's named critical flows. Record framework names
+  and versions (unit runners and E2E) in scaffold-notes.
+- **Deployment config written**: for the architecture's stated target —
+  Dockerfiles, service config, IaC skeleton as appropriate — syntactically
+  valid, checked into the repo, **not executed**. The delivery summary states
+  plainly: the initial deployment is the user's step, and the done-when's deployed half
+  is pending until then.
+- **Cross-cutting FRs placed in foundations by the plan** (e.g., audit-logging
+  groundwork) get their hooks here, with their FR IDs in a comment — the
+  traceability carries into code.
+
+## What the skeleton is not
+
+Not an MVP, not slice 1, not a demo. It's the proof that the architecture
+runs and deploys, and the substrate every slice attaches to. Resist making it
+impressive; make it *green*.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scheduled Visibility Tracking"
+  short_description: "Manage website tracking schedules and reports"
+  default_prompt: "Use $scheduled-visibility-tracking to set up or manage recurring tracking for my website portfolio."

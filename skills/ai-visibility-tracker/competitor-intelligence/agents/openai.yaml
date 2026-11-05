@@ -1,0 +1,4 @@
+interface:
+  display_name: "Competitor Intelligence"
+  short_description: "Compare competitors, traffic and Google rankings"
+  default_prompt: "Use $competitor-intelligence to research my brand and return evidence-linked recommendations."

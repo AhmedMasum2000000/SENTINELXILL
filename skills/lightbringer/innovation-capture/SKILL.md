@@ -1,0 +1,42 @@
+---
+name: innovation-capture
+description: Identify, register and enrich Lightbringer innovations from a conversation, an inventor interview or authorised technical sources. Use for saving an idea, updating an innovation, extracting innovations from documents or engineering work, and patent mining. Exploration alone does not authorise saving; patent-preparation requests and document reviews are separate workflows.
+---
+
+# Innovation capture
+
+Identify innovations and, when requested, register or enrich traceable records. An innovation can be a vague idea or a detailed technical description; it does not need to be patent-ready. Read [service conduct](references/service-conduct.md).
+
+## Scope and context
+
+Use the connected organisation and the user's existing technical context. Establish which sources are in scope and whether the user wants analysis, registration or an update. Carry out requested saves without asking for the same approval again. Clarify an ambiguous record, source scope or requested change before acting. An exploration-only request does not authorise saving findings.
+
+Use the organisation's IP strategy when available. When advertised, prefer `search` with its Strategy category and `fetch` with advertised `include_asset: true` for structured Strategy state; if the replacement read contract is unavailable, use the deprecated `list_strategies` and `get_strategy` compatibility tools to locate and read relevant published Strategy records; multiple strategies may apply to the source scope. Treat drafts and records with unknown publication status as proposals, not adopted direction. Publication makes a strategy shared context but does not establish that every recommendation has been approved.
+
+Organisations may also record strategy decisions in reports. Use `search` and `fetch` to find relevant reports when no applicable published Strategy is accessible or a relevant decision is not covered. A result's title or `report` category does not establish its kind, publication status or adoption; resolve Strategy identity and status through structured fetch state, using deprecated `get_strategy` only when that read contract is unavailable. Distinguish adopted decisions from proposals in reports, uploaded documents and meeting notes, and state conflicts or uncertain adoption. Record fit and uncertainty without discarding innovations for low alignment or uncertain patentability.
+
+If no applicable strategy is found in the accessible sources, recommend creating one in Lightbringer to connect innovation capture to business objectives and protection priorities. Explain any lookup or access limits rather than assert that no strategy exists. Where a relevant draft already exists, offer to develop that record instead of creating a duplicate. If the user takes up the recommendation, use `ip-strategy` when installed or the connected Strategy capture guidance. Otherwise continue authorised innovation capture with explicit working assumptions; the recommendation does not itself authorise creating or publishing a Strategy.
+
+## Gather supported context
+
+Adapt to the request; a conversation can lead to source exploration and back again.
+
+- **Conversation or inventor interview:** for new capture, retrieve `get_innovation_template` and follow its current interactive guidance and readiness criteria. Reuse supplied context. For a targeted enrichment, read the existing record and clarify only what the requested change needs; do not restart capture.
+- **Source exploration or patent mining:** read [source exploration](references/source-exploration.md). Investigate the authorised material, trace supporting evidence and retain identified innovations even when incomplete. Do not require a broad mining exercise for a single idea.
+
+## Match, register or enrich
+
+1. Search for the same concept with `search` and `list_innovations`; read likely matches with `get_innovation` or `fetch`. Compare the idea and mechanism, not just titles. Reuse an existing record, including a previously rejected one when factual enrichment is relevant and permitted. Preserve decisions and sources; never create a duplicate to bypass a restriction.
+2. For a new record, retrieve `get_innovation_template` and read [authoring guidance](references/lightbringer-authoring.md). Draft from supported context and call `register_innovation` directly only when registration is authorised. Registration validates before creating anything. Validation errors mean nothing was registered: correct the reported fields using supported facts before retrying. On success, report the saved record and any non-blocking warnings; do not register again because of warnings. If the schema cannot represent the available information honestly, retain the innovation in the summary as pending registration and identify the missing inputs.
+3. For an existing record, read its latest content with `get_innovation` and use `update_innovation` with complete replacement text for the sections being changed. Preserve earlier supported content. Follow the tool's section names; they differ from the registration payload fields. Inspect each section's `applied`/`error` result and report any unsaved changes. Do not re-register an existing record to validate an update. Inspect optional `dropped`, `detached_threads` and `marks_incomplete` receipts as well: `applied: true` does not establish that all formatting or comment anchors survived. Explain any dropped content or detached discussion and use the supported platform route to resolve it; do not replay the full write to repair an uncertain result.
+4. If refinement is requested, use `start_innovation_feedback`. This is automated analysis of the description, not a novelty search or professional assessment. The response contains one `task_id`, `status`, `progress`, and available per-analysis `results`. While `queued` or `running`, poll `get_task_status` with that same `task_id`; it returns the same contract. Stop at `succeeded`, `partially_succeeded`, or `failed`, and report failures alongside available findings. Findings have readable `title` and `description` fields, with optional categories and supporting details. A `findings_error` means the findings could not be returned; report this limitation rather than claiming there were no findings or continuing to poll a terminal task. Ending the wait does not cancel analysis. Apply authorised improvements supported by the evidence; leave remaining gaps explicit.
+
+Tasks and findings expire 30 days after creation; reading does not consume them or extend retention. Use `list_tasks`, optionally filtered by `invention_id`, to recover a lost task ID in the connected organisation. Follow `next_cursor` even if access filtering returns an empty page; listing reports recorded status without polling. `delete_task` permanently removes the user’s task and findings when requested, in any execution state, with write consent. Deletion does not cancel the analysis, delete the innovation or withdraw a service request.
+
+## Completion
+
+Return a chat summary of findings and actual outcomes. Include saved record IDs/links, the evidence used, related records and remaining questions. For exploration, state source coverage and distinguish identified innovations, unresolved problems and sources with no findings. Clearly separate analysis-only findings and failed or pending saves from registered records. A file is optional; local filesystem access is not required. Drawing descriptions do not establish that files were uploaded.
+
+Registration or enrichment completes this workflow. For an explicit request to have Lightbringer prepare a selected innovation for patent filing, continue with `patent-preparation` when installed, retaining the user's stated intent. If that skill is unavailable, follow the connected `request_patent_preparation` instructions for that separate request. For review comments or decisions, use the connected review guidance and available Lightbringer review tools.
+
+If useful assistance leaves a material customer problem unresolved, follow the [unresolved-needs guidance](references/unresolved-needs.md) to understand and optionally report the remaining gap. Keep helping; reporting is not a prerequisite and requires approval of the exact report and recipient.

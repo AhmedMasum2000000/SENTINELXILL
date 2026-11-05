@@ -1,0 +1,4 @@
+interface:
+  display_name: "SEO Growth Agent"
+  short_description: "Research, remember and review useful SEO work"
+  default_prompt: "Use $seo-growth-agent to review my websites, remember feedback and choose useful SEO actions within my approved budget."

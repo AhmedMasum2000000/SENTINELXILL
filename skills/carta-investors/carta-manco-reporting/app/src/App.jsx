@@ -1,0 +1,796 @@
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { sans, GLOBAL_CSS, FS, FAINT, EASE_OUT } from "./ui/theme.js";
+import AppShell from "./shell/AppShell.jsx";
+import ChatRail, { CHAT_RAIL_WIDTH_PX, CHAT_RAIL_TRANSITION_MS } from "./ui/ChatRail.jsx";
+import { useChatFeatureFlag } from "./shell/chatFeature.js";
+import { setInspectMode } from "./pinpoint/inspect.js";
+import { buildAnchor } from "./pinpoint/capture.js";
+import { findAndMark } from "./pinpoint/findAndMark.js";
+import { mancoContext } from "./pinpoint/mancoContext.js";
+import { chatSessionId, newChatSessionId, clearTranscript, loadChatOpen, saveChatOpen } from "./ui/chatPersistence.js";
+import { reloadPage } from "./shell/reloadPage.js";
+import { parseRoute, navigate as navigateRoute, subscribeNav } from "./shell/route.js";
+import DashboardView from "./views/DashboardView.jsx";
+import BudgetActualsView from "./views/BudgetActualsView.jsx";
+import CustomReportView from "./views/CustomReportView.jsx";
+import MonthlyActualsView from "./views/MonthlyActualsView.jsx";
+import BudgetImport from "./shell/BudgetImport.jsx";
+import DrilldownDrawer from "./views/DrilldownDrawer.jsx";
+import useDrilldown from "./state/useDrilldown.js";
+import useReports, { REPORT_ACTIONS } from "./state/useReports.js";
+import useAutoPull from "./state/useAutoPull.js";
+import { resurfaceDue } from "./state/resurface.js";
+import useLoadFirm, { LOAD_FIRM_LABEL, NO_MANCO_ENTITY } from "./state/useLoadFirm.js";
+import { firmHref, withFirmParam } from "./state/firmParam.js";
+import { loadFirmStepProgress } from "./state/loadFirmSteps.js";
+import LoadingScreen from "./ui/LoadingScreen.jsx";
+import FirmChooser from "./shell/FirmChooser.jsx";
+import FirmDisambiguator from "./shell/FirmDisambiguator.jsx";
+import MancoEntityChooser from "./shell/MancoEntityChooser.jsx";
+import NoMancoEntity from "./shell/NoMancoEntity.jsx";
+import { useHostedApp } from "./shell/hostedApp.js";
+import { BVA, CUSTOM_REPORTING, budgetNavChildren, isCustomReportBudget } from "./shell/reportNav.js";
+import { hasBudget, renderableBudgets } from "./shell/budgetPresence.js";
+import ShareStatus, { pulledMessage } from "./reports/ShareStatus.jsx";
+import { setDisplayCurrency } from "./charts/chartTheme.js";
+import { assignCategoricalColors, assignExpenseCategoryColors } from "./ui/categoricalColors.js";
+import { displayFirmName } from "./ui/firmName.js";
+import { fetchFirmAccess, pinnedFirm } from "./state/firmAccess.js";
+import { trackClick, trackRender } from "./analytics.js";
+
+// This server only ever hosts one firm — the URL's firm segment is cosmetic,
+// corrected to the real slug once the snapshot resolves it, never looked up.
+// The sidebar is clickable before the snapshot names the slug, and a URL can't
+// carry a tab without one, so a tab picked then is held until the slug lands.
+function usePathRoute(firmSlug) {
+  const rawTab = useSyncExternalStore(subscribeNav, () => parseRoute().tab, () => null);
+  const [pendingTab, setPendingTab] = useState(null);
+  const route = pendingTab || rawTab || "dashboard";
+
+  // A layout effect, so the URL names the page before that page's own effects read
+  // its `view` parameter: a passive one would run after the child's, which would
+  // read the previous page's toolbar state.
+  useLayoutEffect(() => {
+    if (!firmSlug) return;
+    const current = parseRoute();
+    if (current.firm !== firmSlug || (pendingTab && pendingTab !== current.tab)) {
+      navigateRoute({ firm: firmSlug, tab: route }, { replace: true });
+    }
+    setPendingTab(null);
+  }, [firmSlug, route, pendingTab]);
+
+  const setRoute = (next) => {
+    if (!firmSlug) { setPendingTab(next); return; }
+    if (parseRoute().tab === next) return;
+    navigateRoute({ firm: firmSlug, tab: next });
+  };
+  return [route, setRoute];
+}
+
+// Slug -> the name its events carry. A Budget-vs-Actuals child slug is a
+// workbook-derived budget id, so it never reaches an id.
+const VIEW_NAMES = {
+  "dashboard": "Dashboard", [BVA]: "BudgetVsActuals",
+  [CUSTOM_REPORTING]: "CustomReporting", "monthly-actuals": "MonthlyActuals",
+};
+
+// The unsaved custom report draft's slug; a draft seeded from a budget appends its id
+// after DRAFT_FROM.
+const NEW_CUSTOM_REPORT = "new-custom-report";
+const DRAFT_FROM = `${NEW_CUSTOM_REPORT}-from-`;
+
+function slugify(name) {
+  return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+// Means the skill has not written snapshot.json yet — a handoff race, not a break.
+// Counting the two together in telemetry would hide whichever is rarer.
+const NOT_READY = "not_ready";
+function reportSnapshotError(reason) {
+  trackRender(reason === NOT_READY ? "MancoReporting.App.DataNotReady" : "MancoReporting.App.SnapshotError");
+}
+
+export default function App() {
+  const [snapshot, setSnapshot] = useState(null);
+  const [accountsData, setAccountsData] = useState(null);
+  // Set once /api/accounts fails, so a page that needs the ledger can say it did not
+  // load instead of waiting on it forever.
+  const [accountsUnavailable, setAccountsUnavailable] = useState(false);
+  // Rebuilt inline, this handed the drawer a new array every render, which
+  // recomputed its whole filter chain and reset the entry list as it grew.
+  const topCategoryNames = useMemo(() => topCategoryNamesFor(accountsData), [accountsData]);
+  // notReady is a handoff race (the skill hasn't written snapshot.json yet; the
+  // auto-load below is already running) and renders the load-status line. error is a
+  // real failure and renders the error banner. At most one of them is set.
+  const [notReady, setNotReady] = useState(false);
+  const [error, setError] = useState(null);
+  // The one place that sets either: every snapshot/load-firm outcome narrows to this
+  // single call so the "at most one" invariant above can't drift out of sync at a site
+  // that forgets the other half of the pair.
+  const setSnapshotError = useCallback((e) => {
+    const isNotReady = e === NOT_READY;
+    setNotReady(isNotReady);
+    setError(isNotReady ? null : e);
+  }, []);
+  // Pairs a snapshot-fetch failure with its telemetry so neither call site has to
+  // remember both halves on its own.
+  const failSnapshot = useCallback((e) => { reportSnapshotError(e); setSnapshotError(e); }, [setSnapshotError]);
+  const drilldown = useDrilldown();
+  const firmSlug = slugify(displayFirmName(snapshot?.firmName));
+  const [route, navigate] = usePathRoute(firmSlug);
+
+  // Chat + Pinpoint — see app/src/ui/ChatRail.jsx and shell/chatFeature.js.
+  // askClaude (shell/chatFeature.js's FEATURES) gates everything below.
+  const askClaude = useChatFeatureFlag();
+  // Restored after a reload (ui/chatPersistence.js), like the session id below.
+  const [chatOpen, setChatOpen] = useState(loadChatOpen);
+  const [pinMode, setPinMode] = useState(false);
+  const [anchor, setAnchor] = useState(null);
+  const [chatModels, setChatModels] = useState(null);
+  const appRootRef = useRef(null);
+  const [chatSession, setChatSession] = useState(chatSessionId);
+
+  useEffect(() => { saveChatOpen(chatOpen); }, [chatOpen]);
+
+  // The browser keeps the modules it already loaded, so a screen Claude just
+  // edited only shows its change after a reload. The transcript, session id
+  // and open state survive it (ui/chatPersistence.js), so the conversation
+  // carries on. The reload runs from an effect, not straight from
+  // onTurnEnd: the flag lands in the same commit as ChatPanel's end of turn,
+  // and ChatPanel's own effect (a child's runs first) saves the finished turn
+  // before this one reloads.
+  const [reloadDue, setReloadDue] = useState(false);
+  const onChatTurnEnd = ({ edited }) => { if (edited) setReloadDue(true); };
+  useEffect(() => { if (reloadDue) reloadPage(); }, [reloadDue]);
+
+  // Drops this session's saved transcript and moves the tab to a new id;
+  // ChatRail remounts ChatPanel under it, empty and with the model unlocked.
+  const startNewConversation = () => {
+    clearTranscript(chatSession);
+    setChatSession(newChatSessionId());
+  };
+
+  useEffect(() => {
+    if (!askClaude) return;
+    fetch("/api/models")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setChatModels(data); })
+      .catch(() => {});
+  }, [askClaude]);
+
+  // Closing the rail also disarms Pinpoint: a chat-less user has no "Esc to
+  // cancel" affordance on screen, so a stray click intercepted by inspect
+  // mode's capture-phase listener would be pinned instead of doing what the
+  // user meant. hideChat is the untracked close; closeChat records the
+  // user's click and then calls it, so the app can hide the rail (a
+  // drill-down opening) without recording a click nobody made.
+  const hideChat = useCallback(() => {
+    setChatOpen(false);
+    setPinMode(false);
+  }, []);
+  const closeChat = useCallback(() => {
+    trackClick("MancoReporting.Chat.Close");
+    hideChat();
+  }, [hideChat]);
+
+  // A single header toggle, matching carta-fund-modeling: open fires its own
+  // event, close reuses closeChat (which also disarms Pinpoint). `null` when
+  // chat is unavailable, so views render nothing for it — see onToggleTheme's
+  // same pattern just below. Opening also closes any open drill-down: both
+  // are fixed, right-docked panels at the same z-index (see DrilldownDrawer),
+  // so showing both at once would stack one on top of the other.
+  const onToggleChat = askClaude ? () => {
+    if (chatOpen) { closeChat(); } else {
+      trackClick("MancoReporting.Chat.Open");
+      setChatOpen(true);
+      drilldown.close();
+    }
+  } : null;
+
+  // The drawer and the rail are the same two right-docked panels — opening
+  // one while the other is already up closes it first, for the same reason
+  // onToggleChat closes the drawer above. Untracked: the user clicked a
+  // drill-down trigger, not a chat close control.
+  useEffect(() => {
+    if (drilldown.selection && chatOpen) hideChat();
+  }, [drilldown.selection, chatOpen, hideChat]);
+
+  // Pinpoint selection: scoped to appRootRef so a click on the chat rail
+  // itself (outside that ref) is never intercepted.
+  useEffect(() => {
+    if (!pinMode) { setInspectMode(false, {}); return undefined; }
+    setInspectMode(true, {
+      root: appRootRef.current,
+      onPin: (el) => {
+        trackClick("MancoReporting.Chat.Pin");
+        const a = buildAnchor(el, {
+          context: mancoContext({
+            firm: displayFirmName(snapshot?.firmName), tab: route,
+            period: snapshot?.asOf, currency: snapshot?.currency,
+          }),
+        });
+        setAnchor(a);
+        setPinMode(false);
+        setChatOpen(true);
+        drilldown.close();
+      },
+      onCancel: () => setPinMode(false),
+    });
+    return () => setInspectMode(false, {});
+  }, [pinMode, snapshot, route]);
+
+  // The mark tracks `anchor` directly, not the pin action that set it: the
+  // anchor is cleared from two places in ChatPanel (Unpin, and right after a
+  // pinned message is sent), and the mark must disappear with it either way.
+  useEffect(() => { findAndMark(anchor); }, [anchor]);
+
+  // Opt-in and persisted; defaults to light.
+  const [dark, setDark] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("theme") === "dark";
+  });
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", dark);
+    try { localStorage.setItem("theme", dark ? "dark" : "light"); } catch { /* private mode */ }
+  }, [dark]);
+  const toggleTheme = () => { trackClick("MancoReporting.App.ToggleTheme"); setDark((d) => !d); };
+
+  // Parallel fetch snapshot + accounts (accounts is optional; drill-downs
+  // just don't render if it's absent). Returns a promise of whether the snapshot read
+  // came back not_ready, so a caller that just finished a load-firm run (below) can tell
+  // "rebuilt, here's the data" from "still not ready" and decide whether to run it again.
+  // A background refetch that fails at the network level while a snapshot is
+  // shown keeps that snapshot up and only records the failure.
+  const lastFetchRef = useRef(0);
+  const snapshotRef = useRef(null);
+  const fetchData = useCallback(({ background = false } = {}) => {
+    lastFetchRef.current = Date.now();
+    let snapshotNotReady = false;
+    return Promise.all([
+      fetch(withFirmParam("/api/snapshot"))
+        .then(r => r.json())
+        .then(data => {
+          if (data?.error) {
+            // A firm-scoped read ?firm= names can be refused (handleDataKey's own
+            // authorizedFirm check) as well as not-yet-built: show the server's reason for a
+            // refusal (data.message), not the bare "forbidden" error code — reportSnapshotError
+            // below buckets every non-not_ready case into one telemetry name either way.
+            failSnapshot(data.error === NOT_READY ? NOT_READY : (data.message || data.error));
+            snapshotNotReady = data.error === NOT_READY;
+            return;
+          }
+          if (data?.ops) {
+            data.ops.total_income = data.ops.total_income ?? data.ops.ytdIncome ?? 0;
+            data.ops.total_expenses = data.ops.total_expenses ?? data.ops.ytdExpenses ?? 0;
+            data.ops.net = data.ops.net ?? (data.ops.total_income - data.ops.total_expenses);
+          }
+          setDisplayCurrency(data?.currency);
+          if (data?.feeSchedule?.funds) assignCategoricalColors(data.feeSchedule.funds);
+          snapshotRef.current = data;
+          setSnapshot(data);
+          setSnapshotError(null);
+        })
+        .catch(e => {
+          const reason = e?.message || String(e);
+          if (background && snapshotRef.current) { reportSnapshotError(reason); return; }
+          failSnapshot(reason);
+        }),
+
+      fetch(withFirmParam("/api/accounts"))
+        .then(r => r.json())
+        .then(data => {
+          if (data?.error) { trackRender("MancoReporting.App.AccountsUnavailable"); setAccountsUnavailable(true); return; }
+          if (data?.monthly_categories?.categories) assignExpenseCategoryColors(data.monthly_categories.categories);
+          setAccountsData(data);
+          setAccountsUnavailable(false);
+        })
+        .catch(() => { trackRender("MancoReporting.App.AccountsUnavailable"); setAccountsUnavailable(true); }),
+    ]).then(() => snapshotNotReady);
+  }, [failSnapshot]);
+  const reportsApi = useReports({ onChanged: fetchData });
+  const hostedApp = useHostedApp();
+  const hiddenReports = reportsApi.reports.filter(r => r.hidden);
+  const [shareNotice, setShareNotice] = useState(null); // see ShareStatus
+  // One run at a time: each unhide moves the listing's version, so a second run would send a stale one.
+  const [unhiding, setUnhiding] = useState(false);
+
+  const showPulled = (result) => setShareNotice({ status: "done", op: REPORT_ACTIONS.PULL, message: pulledMessage(result) });
+  const loadShared = async () => {
+    trackClick("MancoReporting.Nav.LoadSharedReports");
+    setShareNotice({ status: "running", op: REPORT_ACTIONS.PULL });
+    try {
+      const result = await reportsApi.runShareOp(REPORT_ACTIONS.PULL);
+      showPulled(result);
+    } catch (e) {
+      setShareNotice({ status: "error", op: REPORT_ACTIONS.PULL, message: e.message, code: e.code });
+    }
+  };
+  // New shared reports show up on their own on the hosted app; a run that changed nothing
+  // shows nothing.
+  useAutoPull({
+    enabled: !!hostedApp && !!snapshot && reportsApi.available && reportsApi.can(REPORT_ACTIONS.PULL),
+    reportsApi,
+    onPulled: showPulled,
+  });
+  const unhideAll = async () => {
+    trackClick("MancoReporting.Nav.ShowHiddenReports");
+    setUnhiding(true);
+    try {
+      for (const r of hiddenReports) {
+        await reportsApi.act(r.id, REPORT_ACTIONS.HIDE, { hidden: false });
+      }
+    } catch (e) {
+      setShareNotice({ status: "error", op: REPORT_ACTIONS.HIDE, message: e.message });
+    } finally {
+      setUnhiding(false);
+    }
+  };
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Refetch when the tab becomes visible again, so a long-open tab picks up actuals
+  // the server has refreshed since; resurfaceDue throttles it. A network failure leaves
+  // the page as it was.
+  useEffect(() => {
+    const onVisible = () => {
+      if (resurfaceDue(lastFetchRef.current)) fetchData({ background: true });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [fetchData]);
+
+  // Auto-load: when the snapshot comes back not_ready, drive /api/load-firm's SSE
+  // progress stream. /api/reports can depend on the firm just loaded, and the read on
+  // mount ran before it had, so reload it too once the firm is in.
+  //
+  // loadAttempt forces a second run when the run that just finished didn't fix it: a
+  // deploy landing mid-load can mean the version that ran it stamped the documents with
+  // an id the version now serving (this refetch) no longer recognizes, so the refetch
+  // reads not_ready again with no load running behind it. loadTrigger folds that into
+  // one value useLoadFirm's effect reruns on: 0 while nothing should be loading, else a
+  // number that changes on every attempt, so a forced retry (notReady unchanged) reruns
+  // it the same way a fresh not_ready (notReady false -> true) does.
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const loadRetriedRef = useRef(false);
+  const loadTrigger = notReady ? loadAttempt + 1 : 0;
+  const {
+    loadStatus, loadError, errorCode, chooser, choose, closeChooser, reopenChooser,
+    mancoChoice, chooseMancoEntity, firmChoice, chooseFirm,
+  } = useLoadFirm(loadTrigger, async () => {
+    const stillNotReady = await fetchData();
+    reportsApi.reload();
+    if (!stillNotReady) {
+      loadRetriedRef.current = false;
+    } else if (loadRetriedRef.current) {
+      loadRetriedRef.current = false;
+      setSnapshotError("The app was updated while loading. Reload the page.");
+    } else {
+      loadRetriedRef.current = true;
+      setLoadAttempt((a) => a + 1);
+    }
+  });
+
+  // A failure from the load itself (not a transient "still building") is a real error,
+  // not "still loading" — leaving notReady set would read as a load that never finishes.
+  useEffect(() => {
+    if (loadError) setSnapshotError(loadError);
+  }, [loadError, setSnapshotError]);
+
+  // Whether the sidebar offers "Switch firm" once one is loaded: only the hosted app ever
+  // shows more than one firm's worth of nav (the local dev server always serves the one
+  // firm it was started for), and to everyone except a non-staff user confirmed to hold
+  // exactly one firm — pinnedFirm()'s rule (state/firmAccess.js), the same one
+  // useLoadFirm.js uses to decide who skips the chooser. That means Carta staff (who
+  // typically hold none of their own) and a user whose /api/me lookup failed both see it
+  // too — there is no firm to pin them to either way. Resolved independently of the firm
+  // load itself (a deep link or an auto-picked firm never fetches /api/me + /api/firms on
+  // their own) but gated on a snapshot actually landing: nothing in the sidebar (including
+  // this link) shows before then, so there's nothing to gain from the round trip while the
+  // firm is still loading, failed, or has no ManCo entity. `hasSnapshot` (not `snapshot`
+  // itself) keeps this from re-running on every later snapshot refresh.
+  const [canSwitchFirm, setCanSwitchFirm] = useState(false);
+  const hasSnapshot = !!snapshot;
+  useEffect(() => {
+    if (!hostedApp || !hasSnapshot) return undefined;
+    let live = true;
+    const controller = new AbortController();
+    fetchFirmAccess(controller.signal)
+      .then(({ isStaff, firms }) => { if (live) setCanSwitchFirm(!pinnedFirm(isStaff, firms)); })
+      .catch(() => { if (live) setCanSwitchFirm(true); });
+    return () => { live = false; controller.abort(); };
+  }, [hostedApp, hasSnapshot]);
+
+  // Reopens the chooser over the whole page, same as the no-ManCo-entity screen's own
+  // "Choose a different firm" — but from a fully loaded dashboard, where `chooser` alone
+  // wouldn't trigger the full-page guard below (see its own comment).
+  const onChooseFirm = useCallback(() => { trackClick("MancoReporting.Nav.SwitchFirm"); reopenChooser(); }, [reopenChooser]);
+
+  // Picking a firm from a chooser opened over an already-loaded dashboard (the "Switch
+  // firm" case) must not reuse `choose`: `choose` only ever ran before this page had
+  // loaded anything, so nothing in App's state — snapshot, accounts, reports, drilldown —
+  // belonged to another firm while it ran. Reusing it here would leave all of that (and
+  // every `?firm=`-scoped request a background effect makes) pointed at two different
+  // firms until the new load's `onDone` finally replaces `snapshot`, with no guarantee
+  // that finishes rather than erroring. A full navigation starts this page over from
+  // nothing: useLoadFirm's own deep-link resolution reads the new `?firm=` with no old
+  // firm's state left to leak, and a firm whose snapshot is already cached server-side
+  // loads instantly from it. `choose` stays the right call for the two chooser paths that
+  // run before any snapshot exists — the first-load chooser and the no-ManCo-entity screen.
+  const pickFirm = snapshot
+    ? (slug, firmUuid) => window.location.assign(firmHref(slug, firmUuid))
+    : choose;
+
+  // Tab title names the firm, mirroring carta-fund-modeling. No iframe here,
+  // so document.title is set directly instead of posted to an outer shell.
+  useEffect(() => {
+    const name = displayFirmName(snapshot?.firmName);
+    document.title = name ? `${name} | Carta Mgmt Company Reporting` : "Carta Mgmt Company Reporting";
+  }, [snapshot]);
+
+  // Route registry. Entries with `hidden(snapshot)` returning true are
+  // omitted from the sidebar. Budget-vs-Actuals renders a sub-nav item
+  // per Excel-sourced budget (snapshot.budget.budgets[]), so a firm with
+  // several budgets (a YTD dept crosstab plus an annual outline, say)
+  // sees them all. The parent BvA nav slug hides itself when this firm
+  // has no budget at all.
+  const budgetsList = renderableBudgets(snapshot);
+  const firmHasBudget = hasBudget(snapshot);
+  const {
+    own: ownBudgetChildren, customReports: ownCustomReports, sharedWithYou: sharedChildren,
+  } = budgetNavChildren(budgetsList, reportsApi);
+  // `action: true` renders as a muted "+" row, not a page — see Sidebar.jsx. It always
+  // closes the Custom Reporting section, below the reports it makes more of.
+  // NEW_CUSTOM_REPORT, or DRAFT_FROM plus a budget id, is the unsaved draft. A custom
+  // report shows figures only from the ledger, so it is offered only once that loaded.
+  const canDerive = !!accountsData && reportsApi.available && reportsApi.can(REPORT_ACTIONS.DERIVE);
+  const budgetChildren = ownBudgetChildren.map(c => ({ ...c, event: "MancoReporting.Nav.BudgetVsActualsBudget" }));
+  const customReportChildren = [
+    ...ownCustomReports.map(c => ({ ...c, event: "MancoReporting.Nav.CustomReport" })),
+    ...(canDerive ? [{ slug: NEW_CUSTOM_REPORT, label: "New custom report", action: true, event: "MancoReporting.Nav.NewCustomReport" }] : []),
+  ];
+  // `icon` is a lookup key into Sidebar.jsx's ICONS map (Lucide glyphs, per
+  // Ink's brand.md's Ink-icon stand-in mapping).
+  const navItems = [
+    { slug: "dashboard",         label: "Dashboard",         icon: "quickaction" },
+    { slug: BVA,                 label: "Budget vs Actuals", icon: "company",
+      hidden:   () => !firmHasBudget,
+      children: budgetChildren },
+    // Your own saved custom reports, then the action that makes another. A report is
+    // cut from a budget, so the section goes wherever Budget vs Actuals does.
+    { slug: CUSTOM_REPORTING,    label: "Custom Reporting",  icon: "customreport",
+      hidden:   () => !firmHasBudget || customReportChildren.length === 0,
+      children: customReportChildren },
+    // Actuals by GL account, no budget columns — stands in for Budget vs
+    // Actuals only while this firm has nothing budgeted, in Carta or a
+    // workbook. The two never show together.
+    { slug: "monthly-actuals",   label: "Monthly Actuals",   icon: "ledger",
+      hidden:   () => firmHasBudget },
+  ].filter(item => !item.hidden || !item.hidden(snapshot));
+
+  // The tab segment reads "<parent>" or "<parent>/<id>" — peel off the parent slug and
+  // budget id so the switch below renders either.
+  const [routeParent, routeChild] = String(route || "").split("/", 2);
+  const validParents = new Set(navItems.map(i => i.slug));
+  // A draft has no budget yet, so it is recognized by its slug.
+  const isDraftSlug = (slug) => slug === NEW_CUSTOM_REPORT || String(slug).startsWith(DRAFT_FROM);
+  // A budget-vs-actuals/<id> link to one of your custom reports, or to a draft, opens it
+  // under Custom Reporting, where the sidebar lists it.
+  const ownCustomUnderBva = routeParent === BVA && !!routeChild
+    && (isDraftSlug(routeChild) || ownCustomReports.some(c => c.slug === routeChild));
+  // A custom-reporting/<id> child opens only as a draft or a custom report; any other id
+  // (a deleted report, a plain budget) counts as no child at all. One that opens does so
+  // whenever the firm has a budget, even before the section shows: with no saved report
+  // it waits on the ledger, and that page says so.
+  const customChildOpens = !!routeChild && (isDraftSlug(routeChild)
+    || isCustomReportBudget(budgetsList.find(b => b.id === routeChild)));
+  const customPageOpens = routeParent === CUSTOM_REPORTING && customChildOpens && firmHasBudget;
+  const activeParent = ownCustomUnderBva && validParents.has(CUSTOM_REPORTING) ? CUSTOM_REPORTING
+    : validParents.has(routeParent) || customPageOpens ? routeParent : "dashboard";
+  // A section opened with no child specified lands on its first page.
+  const routeBudgetId = routeParent === CUSTOM_REPORTING && !customChildOpens ? null : routeChild;
+  const activeBudgetId = routeBudgetId
+    || (activeParent === BVA && (ownBudgetChildren[0] || sharedChildren[0])?.slug)
+    || (activeParent === CUSTOM_REPORTING && customReportChildren[0]?.slug);
+  const activeRoute = activeBudgetId ? `${activeParent}/${activeBudgetId}` : activeParent;
+
+  // A saved custom report is any budget whose view carries a pivot — yours, a duplicate,
+  // or one shared with you, whose route stays under Budget vs Actuals while its row sits in
+  // "Shared with you", the group that closes the report sections.
+  const onReportPage = activeParent === BVA || activeParent === CUSTOM_REPORTING;
+  const seedBudgetId = String(activeBudgetId).startsWith(DRAFT_FROM) ? activeBudgetId.slice(DRAFT_FROM.length) : null;
+  const isDraftCustomReport = onReportPage && isDraftSlug(activeBudgetId);
+  const activeBudget = budgetsList.find(b => b.id === activeBudgetId) || null;
+  const isCustomReport = isDraftCustomReport || (onReportPage && isCustomReportBudget(activeBudget));
+  const openReport = (id) => navigate(id ? `${BVA}/${id}` : BVA);
+  // Everything the custom report view opens (a saved draft, a duplicate) is your own
+  // custom report.
+  const openCustomReport = (id) => (id ? navigate(`${CUSTOM_REPORTING}/${id}`) : openReport(null));
+  const shareDone = (message) => setShareNotice({ status: "done", op: REPORT_ACTIONS.SHARE, message });
+
+  // Waits for the snapshot: until it lands, Budget vs Actuals is filtered out of
+  // navItems and activeParent falls back to "dashboard" — a page nobody opened.
+  useEffect(() => {
+    if (snapshot) trackRender(`MancoReporting.${VIEW_NAMES[activeParent]}.View`);
+  }, [snapshot, activeParent]);
+
+  // Waits for the snapshot, so it means "this firm has no budget" rather
+  // than "the snapshot has not arrived yet".
+  useEffect(() => {
+    if (snapshot && !firmHasBudget) trackRender("MancoReporting.App.BudgetVsActualsHidden");
+  }, [snapshot, firmHasBudget]);
+
+  const sidebarProps = {
+    firmName: displayFirmName(snapshot?.firmName),
+    canSwitchFirm,
+    onChooseFirm,
+    route: activeRoute,
+    items: navItems,
+    onNavigate: navigate,
+    // Bottom-of-rail data provenance — carta-fund-modeling's own
+    // placement (App.jsx's DataStatus, under the sidebar's wordmark) for
+    // this exact line, moved off the topbar entirely once "Powered by
+    // Carta" was dropped from it and left it with nothing else to show.
+    asOf: snapshot?.asOf,
+    // The ManCo's own books can stop earlier than the fetch date — see
+    // Sidebar.jsx, which only prints this when it differs from asOf.
+    lastPostedDate: snapshot?.lastPostedDate,
+    footerAction: snapshot && <BudgetImport hosted={hostedApp} budgetUpload={snapshot.budgetUpload} onChanged={fetchData} />,
+    shared: (() => {
+      const onPull = reportsApi.can(REPORT_ACTIONS.PULL) ? loadShared : null;
+      const onShowHidden = hiddenReports.length > 0 && reportsApi.can(REPORT_ACTIONS.HIDE) ? unhideAll : null;
+      // The section renders exactly when at least one of its rows would: a shared child,
+      // the pull row, or the show-hidden row. Each row's own gate (onPull, onShowHidden,
+      // sharedChildren) is computed once, here, so this condition can't drift from what
+      // SharedGroup (Sidebar.jsx) actually renders.
+      if (!(snapshot && reportsApi.available && (sharedChildren.length || onPull || onShowHidden))) return null;
+      return {
+        items: sharedChildren,
+        parentSlug: BVA,
+        // Below the last report group shown, so it closes the report sections.
+        afterSlug: validParents.has(CUSTOM_REPORTING) ? CUSTOM_REPORTING : BVA,
+        busy: shareNotice?.status === "running",
+        onPull,
+        hiddenCount: hiddenReports.length,
+        unhiding,
+        onShowHidden,
+      };
+    })(),
+  };
+
+  if (hostedApp && errorCode === NO_MANCO_ENTITY) {
+    // Clears this screen's own `error` (reopenChooser only clears the hook's loadError/
+    // errorCode) so a brief gap before the chooser's /api/me + /api/firms resolve shows the
+    // loading screen below instead of flashing the stale error back in. Clearing `error`
+    // also satisfies the next guard's own `!error` check, which is how its `chooser` branch
+    // shows once reopenChooser resolves.
+    const onChooseAnother = () => { setSnapshotError(null); reopenChooser(); };
+    return (
+      <>
+        <style>{GLOBAL_CSS}</style>
+        <NoMancoEntity message={error} onChooseAnother={onChooseAnother} />
+      </>
+    );
+  }
+  // On the hosted app, nothing in the sidebar (firm name, nav items) is real until the
+  // snapshot lands — it's all the "Loading…" placeholder plus items that may not even
+  // apply to this firm. Covering the whole page instead reads as one loading state
+  // rather than a part-loaded shell. The local dev server has no such placeholder
+  // problem (there's always exactly one firm, already known), so it keeps the sidebar.
+  // `chooser` also covers the sidebar's own "Switch firm" link, opened over an
+  // already-loaded dashboard (`snapshot` non-null): that's why `chooser` has to be in
+  // this condition on its own, not covered already by `notReady || !snapshot`.
+  // `loadStatus`/`mancoChoice`/`firmChoice` stay out of it: `pickFirm` (above) never starts an
+  // in-page load once a snapshot exists, so none of them can be set while this guard would
+  // otherwise read "already loaded" and show the old firm's dashboard underneath.
+  if (hostedApp && !error && (notReady || !snapshot || chooser)) {
+    if (chooser) {
+      return (
+        <>
+          <style>{GLOBAL_CSS}</style>
+          <FirmChooser isStaff={chooser.isStaff} firms={chooser.firms} onPick={pickFirm}
+            onCancel={snapshot ? closeChooser : undefined} />
+        </>
+      );
+    }
+    if (mancoChoice) {
+      return (
+        <>
+          <style>{GLOBAL_CSS}</style>
+          <MancoEntityChooser entities={mancoChoice.entities} onPick={chooseMancoEntity} />
+        </>
+      );
+    }
+    if (firmChoice) {
+      return (
+        <>
+          <style>{GLOBAL_CSS}</style>
+          <FirmDisambiguator firms={firmChoice.firms} onPick={chooseFirm} />
+        </>
+      );
+    }
+    return (
+      <>
+        <style>{GLOBAL_CSS}</style>
+        <LoadingScreen
+          fullPage
+          label={loadStatus || (notReady ? LOAD_FIRM_LABEL : "Loading…")}
+          step={notReady ? loadFirmStepProgress(loadStatus) : undefined}
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <style>{GLOBAL_CSS}</style>
+      {/* Reflows the page left of the rail while chat is open, so the data a
+          question is about stays visible instead of sitting behind the panel
+          asking about it — matches ChatRail's own width and transition. Below
+          ~390px wide, ChatRail itself clamps to 92vw and this margin is a few
+          px wider than the rail, which only adds slack, never a gap. */}
+      <div ref={appRootRef} data-testid="app-root" style={{
+        marginRight: askClaude && chatOpen ? CHAT_RAIL_WIDTH_PX : 0,
+        transition: `margin-right ${CHAT_RAIL_TRANSITION_MS}ms ${EASE_OUT}`,
+      }}>
+      <AppShell sidebarProps={sidebarProps}>
+        {notReady && (
+          <LoadingScreen label={loadStatus || LOAD_FIRM_LABEL} step={loadFirmStepProgress(loadStatus)} />
+        )}
+        {error && (
+          <p style={{ ...sans, fontSize: FS.bodyLg, color: "var(--red)" }}>Error: {error}</p>
+        )}
+        {!error && !notReady && !snapshot && (
+          <LoadingScreen label={loadStatus || "Loading…"} />
+        )}
+        {snapshot && activeParent === "dashboard" && (
+          <DashboardView
+            snapshot={snapshot}
+            accountsData={accountsData}
+            drilldown={accountsData ? drilldown : null}
+            dark={dark}
+            onToggleTheme={toggleTheme}
+            chatOpen={chatOpen}
+            onToggleChat={onToggleChat}
+          />
+        )}
+        {snapshot && activeParent === BVA && !isCustomReport && (
+          <BudgetActualsView
+            snapshot={snapshot}
+            accountsData={accountsData}
+            drilldown={accountsData ? drilldown : null}
+            budgetId={activeBudgetId}
+            dark={dark}
+            onToggleTheme={toggleTheme}
+            chatOpen={chatOpen}
+            onToggleChat={onToggleChat}
+            reportsApi={reportsApi}
+            hosted={hostedApp}
+            onOpenReport={openReport}
+            onShareDone={shareDone}
+            onCreateCustomReport={canDerive ? (id) => navigate(`${CUSTOM_REPORTING}/${DRAFT_FROM}${id}`) : null}
+          />
+        )}
+        {snapshot && !accountsData && isCustomReport && (
+          <p style={{ ...sans, fontSize: FS.bodyLg, color: FAINT }}>
+            {accountsUnavailable
+              ? "Custom reports need the ledger, which did not load. Reload the page."
+              : "Loading the ledger…"}
+          </p>
+        )}
+        {snapshot && accountsData && isCustomReport && (
+          <CustomReportView
+            key={activeBudgetId}
+            snapshot={snapshot}
+            accountsData={accountsData}
+            drilldown={drilldown}
+            budget={isDraftCustomReport ? null : activeBudget}
+            seedBudgetId={seedBudgetId}
+            reportsApi={reportsApi}
+            hosted={hostedApp}
+            onOpenReport={openCustomReport}
+            onShareDone={shareDone}
+            onCancel={() => openReport(null)}
+            dark={dark}
+            onToggleTheme={toggleTheme}
+          />
+        )}
+        {snapshot && activeParent === "monthly-actuals" && (
+          <MonthlyActualsView
+            snapshot={snapshot}
+            accountsData={accountsData}
+            drilldown={accountsData ? drilldown : null}
+            dark={dark}
+            onToggleTheme={toggleTheme}
+            chatOpen={chatOpen}
+            onToggleChat={onToggleChat}
+          />
+        )}
+      </AppShell>
+      </div>
+
+      <ShareStatus
+        notice={shareNotice}
+        progress={reportsApi.shareJob?.progress}
+        firmName={displayFirmName(snapshot?.firmName)}
+        hosted={hostedApp}
+        onDismiss={() => setShareNotice(null)}
+      />
+
+      <DrilldownDrawer
+        selection={drilldown.selection}
+        onClose={drilldown.close}
+        entries={accountsData?.entries || []}
+        fundFeeEntries={accountsData?.fund_fee_entries || []}
+        mancoFeeEntries={accountsData?.manco_fee_entries || []}
+        feeScheduleTerms={accountsData?.fee_schedule_terms || []}
+        spendByGL={snapshot?.spendByGL}
+        buildJournalUrl={buildJournalUrlFor(snapshot)}
+        topCategoryNames={topCategoryNames}
+        asOf={snapshot?.asOf}
+        onDrillAccountForMonth={drillAccountForMonthFor(snapshot, accountsData, drilldown)}
+      />
+
+      {askClaude && (
+        <ChatRail
+          open={chatOpen}
+          onClose={closeChat}
+          sessionId={chatSession}
+          onNewConversation={startNewConversation}
+          onTurnEnd={onChatTurnEnd}
+          anchor={anchor}
+          onAnchorConsumed={() => setAnchor(null)}
+          pinMode={pinMode}
+          onTogglePinMode={() => {
+            trackClick("MancoReporting.Chat.TogglePinpoint");
+            setPinMode((v) => !v);
+          }}
+          models={chatModels?.models}
+          defaultModel={chatModels?.default}
+        />
+      )}
+    </>
+  );
+}
+
+// Build a Carta booking-interface deep-link from the snapshot's cartaIds.
+// URL format (verified via _links.web_url on fa:list:entities and matched
+// against BOOKING_BASE patterns in cash-reconciliation + ramp skills):
+//   https://app.carta.com/investors/firm/{firm}/portfolio/fund/{fund}/fund-accounting/booking-interface/view/{gluuid}/
+//
+// Routes to the entity the entry is booked on. Substituting another —
+// the ManCo's id on a fund's entry — opens a real journal inside the
+// wrong entity's page, which reads as that entity having booked it.
+const CARTA_BASE_URL = "https://app.carta.com";
+export function buildJournalUrlFor(snapshot) {
+  const ids = snapshot?.cartaIds;
+  if (!ids?.firm) return () => null;
+  return (entry) => {
+    const entity = entry?.entity_carta_id ?? ids.manco_fund;
+    if (!entry?.gluuid || !entity) return null;
+    return `${CARTA_BASE_URL}/investors/firm/${ids.firm}/portfolio/fund/${entity}/fund-accounting/booking-interface/view/${entry.gluuid}/`;
+  };
+}
+
+// Given a (month, account) pair from the month-side GL breakdown row click,
+// open a single-month date-range-category drill. Reuses the existing
+// date-range-category kind so the sub-drill matches the shape we already
+// render for breakdown-pane clicks.
+function drillAccountForMonthFor(snapshot, accountsData, drilldown) {
+  const asOf = snapshot?.asOf;
+  if (!asOf || !drilldown?.openDateRangeCategory) return null;
+  const yr = Number(asOf.slice(0, 4));
+  const categories = accountsData?.monthly_categories?.categories || [];
+  return (month, account) => {
+    const mm = String(month).padStart(2, "0");
+    const lastDay = new Date(yr, month, 0).getDate();
+    const start = `${yr}-${mm}-01`;
+    const end   = `${yr}-${mm}-${String(lastDay).padStart(2, "0")}`;
+    const color = categories.find(c => c.name === account)?.color;
+    drilldown.openDateRangeCategory(start, end, account, color);
+  };
+}
+
+function topCategoryNamesFor(accountsData) {
+  const cats = accountsData?.monthly_categories?.categories || [];
+  return cats.filter(c => c.name !== "Other").map(c => c.name);
+}

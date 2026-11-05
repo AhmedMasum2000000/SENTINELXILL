@@ -1,0 +1,145 @@
+import { useMemo } from "react";
+import { fundLabel } from "../../ui/components.jsx";
+import { scenarioTable, scenarioRow, exitDateIrr, poolable, withBench } from "../../model/scenarios.js";
+import { scenarioFund, isPooledScope, isFamilyScope, scopeFundIds, scopeName, ALL_FUNDS } from "../../model/funds.js";
+import { waterfallCfgFor, exitHorizonFor } from "../../model/reprice.js";
+import { FUND_WATERFALL_KEYS } from "../../model/slices.js";
+
+// Shared per-fund scenario model for the Returns-family views (LP Returns, GP
+// Economics, and the Portfolio analysis and LP returns themes on the Reports tab): ONE
+// source of truth for the waterfall config, the S&P rate, the per-multiple
+// scenario grid and the "today's marks" slice. Returns plain values only (no
+// JSX) — each view renders its own sections. Under a pooled scope (all funds, or a
+// family) it models the first fund in scope; the LP sensitivity grid pools the funds in
+// scope separately via `pooledEntries`.
+// Where a fund's marks land: the implied Net TVPI if today's repriced LP NAV (plus
+// anything already distributed) were ultimately delivered on total paid-in incl.
+// scheduled future calls.
+const impliedMultiple = (state, fund) => (state.lpNav + state.lpDistributed) / fund.paidInTotal;
+
+/** The funds the pooled LP sensitivity grid covers (those of `fundIds`: all funds, or a
+ *  family's), each on its own exit horizon and current-marks multiple. Inclusion follows
+ *  `poolable`; a fund with paid-in that is not poolable has its display name returned in
+ *  `excluded`. */
+export function pooledEntries(snapshot, fundStates, assumptions, fundIds = scopeFundIds(snapshot.funds, ALL_FUNDS)) {
+  const entries = [], excluded = [];
+  for (const id of fundIds) {
+    const f = fundStates.find((x) => x.id === id);
+    const fd = scenarioFund(snapshot, id);
+    if (!f) continue;
+    const entry = { fund: fd, exitDate: exitHorizonFor(assumptions, snapshot, id),
+      interim: f.secondaryLegs || [], implied: impliedMultiple(f, fd) };
+    if (poolable(entry)) entries.push(entry);
+    else if (fd.paidInTotal > 0) excluded.push(fundLabel(snapshot.funds.find((x) => x.id === id).name));
+  }
+  return { entries, excluded };
+}
+
+/** The one fund a per-fund view models: exit modeling is inherently per-fund, so
+ *  when the global scope spans several funds (all funds, or a family) it falls back to
+ *  the first of them. */
+export const scopedFundId = (snapshot, fundScope) => scopeFundIds(snapshot.funds, fundScope)[0];
+
+export function useScenarioModel({
+  snapshot, portfolio, fundStates, baseAssumptions, fundScope, setAssumption,
+  exitHorizonOverrides,
+}) {
+  // true while the global scope spans several funds: all funds, or a family (views show a
+  // pick-a-fund hint or pool the funds in `scopeIds`)
+  const allMode = isPooledScope(fundScope);
+  // the ids and funds in scope keep their identity until the funds or the scope change, so the
+  // pooled views' memos below don't rerun on every render
+  const scopeIds = useMemo(() => scopeFundIds(snapshot.funds, fundScope), [snapshot.funds, fundScope]);
+  const scopeFunds = useMemo(() => snapshot.funds.filter((f) => scopeIds.includes(f.id)), [snapshot.funds, scopeIds]);
+  const familyMode = isFamilyScope(fundScope);
+  // how a pooled view names the funds it adds together
+  const poolLabel = familyMode ? `the funds in ${scopeName(snapshot.funds, fundScope)}` : "all funds";
+  const fundId = scopedFundId(snapshot, fundScope);
+  // full waterfall config for this fund — carry + preferred return + GP catch-up,
+  // pre-set from Carta config and overridable per fund in the active scenario
+  const wf = useMemo(() => waterfallCfgFor(portfolio.assumptions, snapshot, fundId),
+    [portfolio.assumptions, snapshot, fundId]);
+  const carryRate = wf.carryRate;
+  const setFundMap = (key, val) =>
+    setAssumption(key, { ...(portfolio.assumptions[key] || {}), [fundId]: val });
+  const setFundCarry = (rate) => setFundMap("carryRates", rate);
+  const setFundPref = (v) => setFundMap("preferredReturns", v);
+  const setFundCatchupRate = (v) => setFundMap("catchupRates", v);
+  const setFundCatchupLimit = (v) => setFundMap("catchupLimits", v);
+  // Assumed exit horizon (ISO date) for this fund — the single terminal date for
+  // the Net LP IRR (and the per-company Deal IRR). Defaults to navAsOf year-end.
+  // Merge onto the RAW override map (not the effective one) so pinning one fund
+  // can't freeze other funds' derived horizons as explicit picks.
+  const setExitHorizon = (dateISO) =>
+    setAssumption("exitHorizon", { ...(exitHorizonOverrides || {}), [fundId]: dateISO });
+  // Drop this fund's per-scenario overrides so the waterfall falls back to the
+  // Carta configuration (snapshot.funds[].waterfall) again.
+  const revertWaterfall = () => {
+    for (const key of FUND_WATERFALL_KEYS) {
+      const m = { ...(portfolio.assumptions[key] || {}) };
+      delete m[fundId];
+      setAssumption(key, m);
+    }
+  };
+  const spRate = portfolio.assumptions.spRate;
+  const hotRate = portfolio.assumptions.spSensitivityRate;
+  // accrued carry today — the booked figure from Carta's books (carried interest
+  // accrued allocation to the GP), distinct from the modeled carry-at-exit rows
+  const accruedCarryToday = snapshot.baseAccruedCarry?.[fundId] ?? 0;
+  const accruedCarryAsOf = snapshot.accruedCarryAsOf || snapshot.gpEconomics?.[fundId]?.accruedCarryAsOf || null;
+  // carry distributed — the booked REALIZED carry paid to the GP ("carried interest
+  // earned" allocation); 0/null when none has been distributed yet → card shows "—".
+  const carryDistributed = snapshot.gpEconomics?.[fundId]?.carryDistributed ?? null;
+  const carryDistributedAsOf = snapshot.carryDistributedAsOf || snapshot.gpEconomics?.[fundId]?.carryDistributedAsOf || null;
+
+  const fund = useMemo(() => scenarioFund(snapshot, fundId), [snapshot, fundId]);
+  // Net LP IRR convention for the whole page: a single terminal on the fund's
+  // assumed exit horizon (default = navAsOf year-end, i.e. "exit now"), matching
+  // the sidebar, the scorecard below, and the per-company Deal IRR — not wind-down.
+  const exitDate = exitHorizonFor(portfolio.assumptions, snapshot, fundId);
+  const fs = fundStates.find((f) => f.id === fundId);
+  // Modeled secondary distributions, dated. They come out of the terminal rather
+  // than adding to it, so a row's multiple is unchanged and only the timing moves.
+  const interim = fs.secondaryLegs || [];
+  const table = useMemo(() => scenarioTable(fund, wf, spRate, exitDate, interim),
+    [fund, wf, spRate, exitDate, interim]);
+
+  // Where THIS SLICE's marks land.
+  const implied = impliedMultiple(fs, fund);
+  const sliceRows = useMemo(() => {
+    if (!(implied > 0)) return [...table];
+    const row = scenarioRow(fund, implied, wf);
+    const irr = exitDateIrr(fund, exitDate, implied, interim);
+    const slice = { ...withBench(row, irr, spRate), isSlice: true };
+    return [...table, slice].sort((a, b) => a.multiple - b.multiple);
+  }, [table, fund, implied, wf, spRate, exitDate, interim]);
+
+  // headline snapshot: where we'd stand if everything realized at today's
+  // marks NOW — i.e. one terminal distribution at this year's exit, not the
+  // far-out wind-down. The grid below is on this same "exit now" basis.
+  const todayIrr = implied > 0 ? exitDateIrr(fund, exitDate, implied, interim) : null;
+  const todayEdge = todayIrr == null ? null : todayIrr - spRate;
+  // GP carry at today's net position — dollars depend on the multiple, not the
+  // exit year; matches the highlighted grid row's GP CARRY.
+  const todayGpCarry = implied > 0 ? scenarioRow(fund, implied, wf).gpCarry : null;
+  const cartaNet = (fs.baseLpNav + fs.lpDistributed) / fund.paidInTotal;
+
+  // ---- Baseline · Carta counterparts for the scorecard comparison ----
+  const baseWf = waterfallCfgFor(baseAssumptions || {}, snapshot, fundId);
+  const baseSpRate = baseAssumptions?.spRate ?? 0.102;
+  const baseNet = (fs.baseLpNav + fs.baseLpDistributed) / fund.paidInTotal;
+  const baseIrr = baseNet > 0 ? exitDateIrr(fund, exitDate, baseNet) : null;
+  const baseEdge = baseIrr == null ? null : baseIrr - baseSpRate;
+  const baseGpCarry = baseNet > 0 ? scenarioRow(fund, baseNet, baseWf).gpCarry : null;
+
+  return {
+    fundId, allMode, familyMode, scopeIds, scopeFunds, poolLabel, wf, carryRate,
+    setFundCarry, setFundPref, setFundCatchupRate, setFundCatchupLimit, revertWaterfall,
+    setExitHorizon, exitDate,
+    spRate, hotRate,
+    accruedCarryToday, accruedCarryAsOf, carryDistributed, carryDistributedAsOf,
+    fund, sliceRows, fs,
+    implied, todayIrr, todayEdge, todayGpCarry, cartaNet,
+    baseNet, baseIrr, baseEdge, baseGpCarry,
+  };
+}

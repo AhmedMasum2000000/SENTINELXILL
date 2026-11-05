@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Search Visibility Tracker"
+  short_description: "Audit AI search citations with your Apify access"
+  default_prompt: "Use $ai-visibility-tracker to check whether AI search platforms cite my domain for my selected topics."

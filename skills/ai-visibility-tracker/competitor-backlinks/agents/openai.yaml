@@ -1,0 +1,4 @@
+interface:
+  display_name: "Competitor Backlinks"
+  short_description: "Compare observed competitor backlink samples"
+  default_prompt: "Use $competitor-backlinks to research my brand and return evidence-linked recommendations."

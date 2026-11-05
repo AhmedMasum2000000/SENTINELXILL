@@ -1,0 +1,4 @@
+interface:
+  display_name: "Search Trends"
+  short_description: "Explore seasonality and emerging search topics"
+  default_prompt: "Use $search-trends to research my brand and return evidence-linked recommendations."

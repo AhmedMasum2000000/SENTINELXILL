@@ -1,0 +1,59 @@
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
+"""Render the Fund Performance page: render-artifact.py <output> [--home-url <carta_home_url>]"""
+
+import sys
+from pathlib import Path
+
+_LIB = next(p for p in Path(__file__).resolve().parents if (p / "lib" / "live_artifact_render").is_dir()) / "lib"
+sys.path.insert(0, str(_LIB))
+
+from live_artifact_render import CLAUDE_ARTIFACT_URL_RE, check_path_under_cwd, inline_tracker, read_skill_version  # noqa: E402
+from live_artifact_render.customizations import stamp_baseline  # noqa: E402
+
+SKILL_DIR = Path(__file__).resolve().parent.parent
+TEMPLATE = SKILL_DIR / "references" / "artifact.html"
+PLACEHOLDER = "{{HOME_URL}}"
+VERSION_PLACEHOLDER = "{{ARTIFACT_VERSION}}"
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    home_url = ""
+    if len(args) == 3 and args[1] == "--home-url":
+        home_url = args[2]
+    elif len(args) != 1:
+        print("usage: render-artifact.py <output> [--home-url <carta_home_url>]", file=sys.stderr)
+        return 2
+
+    if home_url and not CLAUDE_ARTIFACT_URL_RE.match(home_url):
+        print(f"error: --home-url is not a claude.ai artifact URL: {home_url!r}", file=sys.stderr)
+        return 1
+
+    out_path = check_path_under_cwd(Path(args[0]), "output path")
+    if out_path is None:
+        return 1
+
+    content = inline_tracker(TEMPLATE.read_text(encoding="utf-8"), "carta-fund-performance")
+    if PLACEHOLDER not in content:
+        print(f"error: template missing {PLACEHOLDER}", file=sys.stderr)
+        return 1
+
+    # Restamp after the Home link and version go in, so the baseline records the page
+    # exactly as published: a later republish compares the live page against it to find
+    # what the user changed (references/keep-customizations.md).
+    version = read_skill_version(SKILL_DIR)
+    content = content.replace(PLACEHOLDER, home_url).replace(VERSION_PLACEHOLDER, version)
+    if VERSION_PLACEHOLDER in content:
+        print(f"error: {VERSION_PLACEHOLDER} still present after substitution", file=sys.stderr)
+        return 1
+    content = stamp_baseline(content, version)
+    out_path.write_text(content, encoding="utf-8")
+    print(out_path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
