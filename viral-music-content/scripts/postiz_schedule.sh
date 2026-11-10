@@ -22,14 +22,15 @@ SLOTS=("11:00" "17:00" "21:00")
 START_DATE="${START_DATE:-$(date -u -d tomorrow +%F)}"
 DEFAULT_CAPTION='Down In Bossa 🌴 Ash Army x ACND, out now. Full track in bio. #afrohouse #downinbossa #housemusic #fyp'
 
-postiz auth:status >/dev/null || { echo "Not authenticated: run 'postiz auth:login'"; exit 1; }
+[ "${DRY_RUN:-0}" = 1 ] || postiz auth:status >/dev/null || { echo "Not authenticated: run 'postiz auth:login'"; exit 1; }
 
 i=0
 for f in "$DIR"/*.mp4; do
   [ -e "$f" ] || { echo "No mp4 files in $DIR"; exit 1; }
   idea=$(basename "$f" | cut -d_ -f1)
   caption="$DEFAULT_CAPTION"
-  [ -f "captions/${idea}.txt" ] && caption=$(cat "captions/${idea}.txt")
+  CAP_DIR="$(dirname "$0")/../captions"
+  [ -f "$CAP_DIR/${idea}.txt" ] && caption=$(cat "$CAP_DIR/${idea}.txt")
   day=$(( i / ${#SLOTS[@]} ))
   when="$(date -u -d "$START_DATE + $day day" +%F)T${SLOTS[$(( i % ${#SLOTS[@]} ))]}:00Z"
 

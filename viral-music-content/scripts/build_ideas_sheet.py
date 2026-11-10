@@ -203,6 +203,23 @@ def main():
     rs.column_dimensions["I"].width = 70
     rs.column_dimensions["J"].width = 45
 
+    # Ready-to-post captions, picked up by postiz_schedule.sh as captions/<idea#>.txt
+    cap_dir = ROOT / "captions"
+    cap_dir.mkdir(exist_ok=True)
+    tags = {
+        "Genre Flip": "#bossanova #afrohouse #mashup", "Crowd & DJ": "#afrohouse #dj #housemusic",
+        "Producer BTS": "#producer #musicproducer #afrohouse", "Lifestyle": "#summervibes #afrohouse #travel",
+        "Trend Starter": "#downinbossa #dancechallenge #afrohouse", "Fan & UGC": "#downinbossa #afrohouse #fyp",
+    }
+    for i, row in enumerate(IDEAS, 1):
+        cat, on_screen = row[0], row[5]
+        lead = on_screen if on_screen and "none" not in on_screen.lower() else row[1]
+        (cap_dir / f"{i:03d}.txt").write_text(
+            f"{lead} 🌴\n\nAsh Army x ACND – Down In Bossa. Out now, full track in bio.\n"
+            f"Comment BOSSA and we'll send you the link.\n\n"
+            f"{tags.get(cat, '#afrohouse #housemusic')} #downinbossa #fyp\n"
+        )
+
     out = ROOT / "Down_In_Bossa_100_Viral_Ideas.xlsx"
     wb.save(out)
     print(f"Wrote {out} ({len(IDEAS)} ideas, {len(research)} research rows) for {TRACK}")
