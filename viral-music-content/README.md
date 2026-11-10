@@ -9,7 +9,6 @@ Campaign kit for **Ash Army & ACND – "Down In Bossa"** (Afro House, out 30 Oct
 | `research_youtube_2026-11-10.json` | YouTube search results for the niche. |
 | `scripts/scrape_virality.py` | Re-runs the YouTube research for any keywords. Needs `pip install yt-dlp`. |
 | `scripts/build_ideas_sheet.py` | Rebuilds the xlsx after you edit the idea list. |
-| `scripts/make_reels.py` | **Auto-renders 9:16 reels** from the track plus the sheet. Templates: cold-open on the drop, 3-2-1 countdown, lyric-pulse spectrum. Each has the idea's hook text and the CTA. `python3 scripts/make_reels.py --audio track.mp4 --drop <seconds> [--cover art.jpg]` |
 | `captions/NNN.txt` | Ready-to-post caption for each idea (hook, CTA, hashtags). The scheduler picks these up automatically. |
 | `scripts/postiz_schedule.sh` | Batch-schedules finished MP4s to TikTok, IG and YT Shorts through Postiz. |
 
